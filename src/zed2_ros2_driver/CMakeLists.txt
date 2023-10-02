@@ -18,6 +18,7 @@ find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(stereo_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
 
 # Assuming CUDA is installed in the typical directory
 list(APPEND CUDA_INCLUDE_DIRS "/usr/local/cuda/include")
@@ -32,7 +33,7 @@ add_executable(zed_node src/zed_node.cpp)
 set(ZED_LIBRARY /usr/local/zed/lib/libsl_zed.so)
 target_link_libraries(zed_node ${ZED_LIBRARY})
 
-ament_target_dependencies(zed_node rclcpp sensor_msgs stereo_msgs nav_msgs)
+ament_target_dependencies(zed_node rclcpp sensor_msgs stereo_msgs nav_msgs geometry_msgs)
 
 install(TARGETS zed_node
   DESTINATION lib/${PROJECT_NAME})

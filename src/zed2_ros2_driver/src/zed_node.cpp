@@ -1,5 +1,6 @@
 #include "rclcpp/rclcpp.hpp"
 #include <sl/Camera.hpp>
+#include "geometry_msgs/msg/twist.hpp" // Include for Twist messages
 
 using namespace sl;
 
@@ -8,11 +9,16 @@ class ZedNode : public rclcpp::Node
 public:
     ZedNode() : Node("zed_node")
     {
-        // Initialize ZED camera and print serial number
+        // Initialize a publisher for Twist messages
+        pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+
+        // Initialize ZED camera and react based on detected obstacles
         detectObstacle();
     }
 
 private:
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_; // Twist publisher
+
     void detectObstacle()
     {
         Camera zed;
@@ -44,19 +50,29 @@ private:
                 sl::float4 point_cloud_value;
                 point_cloud.getValue(x, y, &point_cloud_value);
 
+                geometry_msgs::msg::Twist twist_msg; // Message to be published
+
                 if (std::isfinite(point_cloud_value.z))
                 {
                     float distance = sqrt(point_cloud_value.x * point_cloud_value.x + point_cloud_value.y * point_cloud_value.y + point_cloud_value.z * point_cloud_value.z);
                     RCLCPP_INFO(this->get_logger(), "Distance to Camera at {%d; %d}: %f mm", x, y, distance);
 
                     if (distance < 1000)
-                    { // For example, if object is closer than 1 meter
+                    {
                         RCLCPP_WARN(this->get_logger(), "Obstacle detected! Stopping.");
+                        // Set linear and angular velocities to 0
+                        twist_msg.linear.x = 0.0;
+                        twist_msg.angular.z = 0.0;
                     }
                     else
                     {
                         RCLCPP_INFO(this->get_logger(), "Path is clear. Moving forward.");
+                        // Set a forward linear velocity, and no rotation
+                        twist_msg.linear.x = 0.5; // Example speed
+                        twist_msg.angular.z = 0.0;
                     }
+
+                    pub_->publish(twist_msg); // Publish the message
                 }
                 else
                 {
