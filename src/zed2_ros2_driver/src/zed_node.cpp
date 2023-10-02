@@ -1,16 +1,36 @@
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/image.hpp"
-#include "stereo_msgs/msg/disparity_image.hpp"
+#include <sl/Camera.hpp>
 
-class ZedNode: public rclcpp::Node
+using namespace sl;
+
+class ZedNode : public rclcpp::Node
 {
-    public:
+public:
     ZedNode() : Node("zed_node")
     {
-        RCLCPP_INFO(this->get_logger(), "ZedNode Initialised");
+        // Initialize ZED camera and print serial number
+        initializeZed();
     }
 
-    private:
+private:
+    void initializeZed()
+    {
+        Camera zed;
+
+        // Open the camera
+        ERROR_CODE returned_state = zed.open();
+        if (returned_state != ERROR_CODE::SUCCESS) {
+            RCLCPP_ERROR(this->get_logger(), "Error %d: Cannot open ZED camera.", returned_state);
+            return;
+        }
+
+        // Get camera information (ZED serial number)
+        auto camera_infos = zed.getCameraInformation();
+        RCLCPP_INFO(this->get_logger(), "Hello! This is my serial number: %d", camera_infos.serial_number);
+
+        // Close the camera
+        zed.close();
+    }
 };
 
 int main(int argc, char * argv[])
@@ -18,13 +38,8 @@ int main(int argc, char * argv[])
     rclcpp::init(argc, argv);
     auto node = std::make_shared<ZedNode>();
 
-    // Print message every second
-    rclcpp::Rate rate(1.0); // 1 Hz
-    while(rclcpp::ok())
-    {
-        RCLCPP_INFO(node->get_logger(), "ZedNode is running ...");
-        rate.sleep();
-    }
+    // Keep the node running
+    rclcpp::spin(node);
 
     rclcpp::shutdown();
     return 0;

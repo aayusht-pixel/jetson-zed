@@ -19,6 +19,10 @@ find_package(sensor_msgs REQUIRED)
 find_package(stereo_msgs REQUIRED)
 find_package(nav_msgs REQUIRED)
 
+# Assuming CUDA is installed in the typical directory
+list(APPEND CUDA_INCLUDE_DIRS "/usr/local/cuda/include")
+include_directories(${CUDA_INCLUDE_DIRS})
+
 set(ZED_INCLUDE_DIR /usr/local/zed/include)
 include_directories(${ZED_INCLUDE_DIR})
 
