@@ -5,7 +5,6 @@
 
 using namespace sl;
 
-// Define voxel states
 enum VoxelState
 {
     UNKNOWN,
@@ -13,21 +12,24 @@ enum VoxelState
     OCCUPIED
 };
 
-// Define the voxel grid dimensions and resolution
-const int GRID_SIZE_X = 50;
-const int GRID_SIZE_Y = 50;
-const int GRID_SIZE_Z = 50;
-const float VOXEL_RESOLUTION = 0.1; // 10cm
+const int GRID_SIZE_X = 500;
+const int GRID_SIZE_Y = 500;
+const int GRID_SIZE_Z = 200;
+const float VOXEL_RESOLUTION = 0.1;    // 10cm
+const float NAVIGABLE_THRESHOLD = 0.2; // 20% occupied voxels
+
+// Define the offsets (adjust these values as needed)
+const float ORIGIN_OFFSET_X = -GRID_SIZE_X * VOXEL_RESOLUTION * 0.5; // centering the grid
+const float ORIGIN_OFFSET_Y = -GRID_SIZE_Y * VOXEL_RESOLUTION * 0.5;
+const float ORIGIN_OFFSET_Z = 0; // Assuming ground level as the bottom-most layer
 
 class ZedNode : public rclcpp::Node
 {
 public:
     ZedNode() : Node("zed_node")
     {
-        // Initialize a publisher for Twist messages
         pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
 
-        // Initialize the voxel grid
         voxelGrid.resize(GRID_SIZE_X);
         for (int x = 0; x < GRID_SIZE_X; x++)
         {
@@ -38,7 +40,6 @@ public:
             }
         }
 
-        // Initialize ZED camera and react based on detected obstacles
         detectObstacle();
     }
 
@@ -49,8 +50,6 @@ private:
     void detectObstacle()
     {
         Camera zed;
-
-        // Set configuration parameters
         InitParameters init_parameters;
         init_parameters.camera_resolution = RESOLUTION::HD720;
         init_parameters.depth_mode = DEPTH_MODE::PERFORMANCE;
@@ -76,39 +75,37 @@ private:
                 zed.retrieveMeasure(depth, MEASURE::DEPTH);
                 zed.retrieveMeasure(point_cloud, MEASURE::XYZRGBA);
 
-                // Update the voxel grid with new data
-                updateVoxelGrid(point_cloud);
-
-                int x = image.getWidth() / 2;
-                int y = image.getHeight() / 2;
-                sl::float4 point_cloud_value;
-                point_cloud.getValue(x, y, &point_cloud_value);
-
-                geometry_msgs::msg::Twist twist_msg;
-
-                if (std::isfinite(point_cloud_value.z))
+                // Reset the front section of the voxel grid
+                for (int x = 0; x < GRID_SIZE_X; x++)
                 {
-                    float distance = sqrt(point_cloud_value.x * point_cloud_value.x + point_cloud_value.y * point_cloud_value.y + point_cloud_value.z * point_cloud_value.z);
-                    RCLCPP_INFO(this->get_logger(), "Distance to Camera at {%d; %d}: %f mm", x, y, distance);
-
-                    if (distance < 1000)
+                    for (int z = 0; z < GRID_SIZE_Z; z++)
                     {
-                        RCLCPP_WARN(this->get_logger(), "Obstacle detected! Stopping.");
-                        twist_msg.linear.x = 0.0;
-                        twist_msg.angular.z = 0.0;
+                        voxelGrid[x][GRID_SIZE_Y - 1][z] = UNKNOWN;
                     }
-                    else
-                    {
-                        RCLCPP_INFO(this->get_logger(), "Path is clear. Moving forward.");
-                        twist_msg.linear.x = 0.5;
-                        twist_msg.angular.z = 0.0;
-                    }
+                }
 
-                    pub_->publish(twist_msg);
+                int validPoints = updateVoxelGrid(point_cloud);
+
+                int occupiedCount = 0;
+                for (int x = 0; x < GRID_SIZE_X; x++)
+                {
+                    for (int z = 0; z < GRID_SIZE_Z; z++)
+                    {
+                        if (voxelGrid[x][GRID_SIZE_Y - 1][z] == OCCUPIED)
+                        {
+                            occupiedCount++;
+                        }
+                    }
+                }
+                RCLCPP_INFO(this->get_logger(), "Number of OCCUPIED voxels in front: %d", occupiedCount);
+
+                if (isTerrainNavigable(validPoints))
+                {
+                    RCLCPP_INFO(this->get_logger(), "Terrain is navigable.");
                 }
                 else
                 {
-                    RCLCPP_ERROR(this->get_logger(), "The distance cannot be computed at {%d; %d}", x, y);
+                    RCLCPP_WARN(this->get_logger(), "Terrain is not navigable.");
                 }
             }
         }
@@ -116,10 +113,12 @@ private:
         zed.close();
     }
 
-    void updateVoxelGrid(const sl::Mat &pointCloud)
+    int updateVoxelGrid(const sl::Mat &pointCloud)
     {
         int width = pointCloud.getWidth();
         int height = pointCloud.getHeight();
+        int validPoints = 0;
+        int pointsWithinGrid = 0;
 
         for (int y = 0; y < height; y++)
         {
@@ -128,18 +127,58 @@ private:
                 sl::float4 point;
                 pointCloud.getValue(x, y, &point);
 
-                int voxel_x = point.x / VOXEL_RESOLUTION;
-                int voxel_y = point.y / VOXEL_RESOLUTION;
-                int voxel_z = point.z / VOXEL_RESOLUTION;
-
-                if (0 <= voxel_x && voxel_x < GRID_SIZE_X &&
-                    0 <= voxel_y && voxel_y < GRID_SIZE_Y &&
-                    0 <= voxel_z && voxel_z < GRID_SIZE_Z)
+                if (std::isfinite(point.x) && std::isfinite(point.y) && std::isfinite(point.z))
                 {
-                    voxelGrid[voxel_x][voxel_y][voxel_z] = OCCUPIED;
+                    validPoints++;
+
+                    int voxel_x = (point.x / 1000 - ORIGIN_OFFSET_X) / VOXEL_RESOLUTION;
+                    int voxel_y = (point.y / 1000 - ORIGIN_OFFSET_Y) / VOXEL_RESOLUTION;
+                    int voxel_z = (point.z / 1000 - ORIGIN_OFFSET_Z) / VOXEL_RESOLUTION;
+
+                    if (0 <= voxel_x && voxel_x < GRID_SIZE_X &&
+                        0 <= voxel_y && voxel_y < GRID_SIZE_Y &&
+                        0 <= voxel_z && voxel_z < GRID_SIZE_Z)
+                    {
+                        voxelGrid[voxel_x][voxel_y][voxel_z] = OCCUPIED;
+                        pointsWithinGrid++;
+                    }
+
+                    // Print a few transformed points for diagnostic purposes
+                    if (x % 100 == 0 && y % 100 == 0)
+                    {
+                        RCLCPP_INFO(this->get_logger(), "Point (%f, %f, %f) -> Voxel (%d, %d, %d)",
+                                    point.x, point.y, point.z, voxel_x, voxel_y, voxel_z);
+                    }
                 }
             }
         }
+
+        RCLCPP_INFO(this->get_logger(), "Processed %d points. Valid points: %d. Points within grid: %d",
+                    width * height, validPoints, pointsWithinGrid);
+
+        return validPoints;
+    }
+
+    bool isTerrainNavigable(int validPoints)
+    {
+        // If no valid points detected, terrain is not navigable.
+        if (validPoints == 0)
+            return false;
+
+        int occupiedCount = 0;
+        for (int x = 0; x < GRID_SIZE_X; x++)
+        {
+            for (int z = 0; z < GRID_SIZE_Z; z++)
+            {
+                if (voxelGrid[x][GRID_SIZE_Y - 1][z] == OCCUPIED)
+                {
+                    occupiedCount++;
+                }
+            }
+        }
+
+        float occupiedRatio = static_cast<float>(occupiedCount) / (GRID_SIZE_X * GRID_SIZE_Z);
+        return occupiedRatio < NAVIGABLE_THRESHOLD;
     }
 };
 
