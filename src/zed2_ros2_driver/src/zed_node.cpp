@@ -2,6 +2,8 @@
 #include <sl/Camera.hpp>
 #include "geometry_msgs/msg/twist.hpp"
 #include <vector>
+#include <thread>
+#include <mutex>
 
 using namespace sl;
 
@@ -15,13 +17,12 @@ enum VoxelState
 const int GRID_SIZE_X = 500;
 const int GRID_SIZE_Y = 500;
 const int GRID_SIZE_Z = 200;
-const float VOXEL_RESOLUTION = 0.1;    // 10cm
-const float NAVIGABLE_THRESHOLD = 0.2; // 20% occupied voxels
+const float VOXEL_RESOLUTION = 0.1;
+const float NAVIGABLE_THRESHOLD = 0.2;
 
-// Define the offsets (adjust these values as needed)
-const float ORIGIN_OFFSET_X = -GRID_SIZE_X * VOXEL_RESOLUTION * 0.5; // centering the grid
+const float ORIGIN_OFFSET_X = -GRID_SIZE_X * VOXEL_RESOLUTION * 0.5;
 const float ORIGIN_OFFSET_Y = -GRID_SIZE_Y * VOXEL_RESOLUTION * 0.5;
-const float ORIGIN_OFFSET_Z = 0; // Assuming ground level as the bottom-most layer
+const float ORIGIN_OFFSET_Z = 0;
 
 class ZedNode : public rclcpp::Node
 {
@@ -40,12 +41,28 @@ public:
             }
         }
 
-        detectObstacle();
+        detectObstacleThread = std::thread(&ZedNode::detectObstacleThreadFunction, this);
+        detectObstacleThread.detach();
+    }
+
+    ~ZedNode()
+    {
+        shutdown_ = true;
+        if (detectObstacleThread.joinable())
+            detectObstacleThread.join();
     }
 
 private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_;
     std::vector<std::vector<std::vector<VoxelState>>> voxelGrid;
+    std::thread detectObstacleThread;
+    std::mutex voxelGridMutex_;
+    bool shutdown_ = false;
+
+    void detectObstacleThreadFunction()
+    {
+        detectObstacle();
+    }
 
     void detectObstacle()
     {
@@ -67,7 +84,7 @@ private:
 
         sl::Mat image, depth, point_cloud;
 
-        while (rclcpp::ok())
+        while (rclcpp::ok() && !shutdown_)
         {
             if (zed.grab() == ERROR_CODE::SUCCESS)
             {
@@ -75,7 +92,7 @@ private:
                 zed.retrieveMeasure(depth, MEASURE::DEPTH);
                 zed.retrieveMeasure(point_cloud, MEASURE::XYZRGBA);
 
-                // Reset the front section of the voxel grid
+                voxelGridMutex_.lock();
                 for (int x = 0; x < GRID_SIZE_X; x++)
                 {
                     for (int z = 0; z < GRID_SIZE_Z; z++)
@@ -83,6 +100,7 @@ private:
                         voxelGrid[x][GRID_SIZE_Y - 1][z] = UNKNOWN;
                     }
                 }
+                voxelGridMutex_.unlock();
 
                 int validPoints = updateVoxelGrid(point_cloud);
 
@@ -112,18 +130,16 @@ private:
 
                 if (isTerrainNavigable(validPoints))
                 {
-                    
-                    cmd_msg.linear.x = 0.5;  // Move forward with a speed of 0.5 m/s
-                    cmd_msg.angular.z = 0.0; // No rotation
+                    cmd_msg.linear.x = 0.5;
+                    cmd_msg.angular.z = 0.0;
                 }
                 else
                 {
-                    cmd_msg.linear.x = 0.0;  // Stop
-                    cmd_msg.angular.z = 0.0; // No rotation
+                    cmd_msg.linear.x = 0.0;
+                    cmd_msg.angular.z = 0.0;
                 }
 
                 pub_->publish(cmd_msg);
-
             }
         }
 
@@ -152,6 +168,7 @@ private:
                     int voxel_y = (point.y / 1000 - ORIGIN_OFFSET_Y) / VOXEL_RESOLUTION;
                     int voxel_z = (point.z / 1000 - ORIGIN_OFFSET_Z) / VOXEL_RESOLUTION;
 
+                    voxelGridMutex_.lock();
                     if (0 <= voxel_x && voxel_x < GRID_SIZE_X &&
                         0 <= voxel_y && voxel_y < GRID_SIZE_Y &&
                         0 <= voxel_z && voxel_z < GRID_SIZE_Z)
@@ -159,13 +176,7 @@ private:
                         voxelGrid[voxel_x][voxel_y][voxel_z] = OCCUPIED;
                         pointsWithinGrid++;
                     }
-
-                    // Print a few transformed points for diagnostic purposes
-                    if (x % 100 == 0 && y % 100 == 0)
-                    {
-                        RCLCPP_INFO(this->get_logger(), "Point (%f, %f, %f) -> Voxel (%d, %d, %d)",
-                                    point.x, point.y, point.z, voxel_x, voxel_y, voxel_z);
-                    }
+                    voxelGridMutex_.unlock();
                 }
             }
         }
@@ -178,7 +189,6 @@ private:
 
     bool isTerrainNavigable(int validPoints)
     {
-        // If no valid points detected, terrain is not navigable.
         if (validPoints == 0)
             return false;
 
