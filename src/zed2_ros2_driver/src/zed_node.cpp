@@ -2,6 +2,7 @@
 #include <sl/Camera.hpp>
 #include "geometry_msgs/msg/twist.hpp"
 #include <vector>
+#include <mutex>
 
 using namespace sl;
 
@@ -12,16 +13,14 @@ enum VoxelState
     OCCUPIED
 };
 
-const int GRID_SIZE_X = 500;
+const int GRID_SIZE_X = 1000;
 const int GRID_SIZE_Y = 500;
-const int GRID_SIZE_Z = 200;
-const float VOXEL_RESOLUTION = 0.1;    // 10cm
-const float NAVIGABLE_THRESHOLD = 0.2; // 20% occupied voxels
-
-// Define the offsets (adjust these values as needed)
-const float ORIGIN_OFFSET_X = -GRID_SIZE_X * VOXEL_RESOLUTION * 0.5; // centering the grid
+const int GRID_SIZE_Z = 400;
+const float VOXEL_RESOLUTION = 0.1;
+const float NAVIGABLE_THRESHOLD = 0.2;
+const float ORIGIN_OFFSET_X = -GRID_SIZE_X * VOXEL_RESOLUTION * 0.5;
 const float ORIGIN_OFFSET_Y = -GRID_SIZE_Y * VOXEL_RESOLUTION * 0.5;
-const float ORIGIN_OFFSET_Z = 0; // Assuming ground level as the bottom-most layer
+const float ORIGIN_OFFSET_Z = 0;
 
 class ZedNode : public rclcpp::Node
 {
@@ -46,6 +45,8 @@ public:
 private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr pub_;
     std::vector<std::vector<std::vector<VoxelState>>> voxelGrid;
+    std::vector<std::vector<std::vector<int>>> labels;
+    std::mutex voxelGridMutex_;
 
     void detectObstacle()
     {
@@ -71,11 +72,11 @@ private:
         {
             if (zed.grab() == ERROR_CODE::SUCCESS)
             {
+                RCLCPP_INFO(this->get_logger(), "Frame grabbed successfully.");
                 zed.retrieveImage(image, VIEW::LEFT);
                 zed.retrieveMeasure(depth, MEASURE::DEPTH);
                 zed.retrieveMeasure(point_cloud, MEASURE::XYZRGBA);
 
-                // Reset the front section of the voxel grid
                 for (int x = 0; x < GRID_SIZE_X; x++)
                 {
                     for (int z = 0; z < GRID_SIZE_Z; z++)
@@ -85,6 +86,7 @@ private:
                 }
 
                 int validPoints = updateVoxelGrid(point_cloud);
+                estimateObjectSizes();
 
                 int occupiedCount = 0;
                 for (int x = 0; x < GRID_SIZE_X; x++)
@@ -112,18 +114,16 @@ private:
 
                 if (isTerrainNavigable(validPoints))
                 {
-                    
-                    cmd_msg.linear.x = 0.5;  // Move forward with a speed of 0.5 m/s
-                    cmd_msg.angular.z = 0.0; // No rotation
+                    cmd_msg.linear.x = 0.5;
+                    cmd_msg.angular.z = 0.0;
                 }
                 else
                 {
-                    cmd_msg.linear.x = 0.0;  // Stop
-                    cmd_msg.angular.z = 0.0; // No rotation
+                    cmd_msg.linear.x = 0.0;
+                    cmd_msg.angular.z = 0.0;
                 }
 
                 pub_->publish(cmd_msg);
-
             }
         }
 
@@ -196,6 +196,89 @@ private:
 
         float occupiedRatio = static_cast<float>(occupiedCount) / (GRID_SIZE_X * GRID_SIZE_Z);
         return occupiedRatio < NAVIGABLE_THRESHOLD;
+    }
+
+    void initializeLabels()
+    {
+        labels.resize(GRID_SIZE_X);
+        for (int x = 0; x < GRID_SIZE_X; x++)
+        {
+            labels[x].resize(GRID_SIZE_Y);
+            for (int y = 0; y < GRID_SIZE_Y; y++)
+            {
+                labels[x][y].resize(GRID_SIZE_Z, 0);
+            }
+        }
+    }
+
+    void DFS(int x, int y, int z, int currentLabel)
+    {
+        if (x < 0 || x >= GRID_SIZE_X || y < 0 || y >= GRID_SIZE_Y || z < 0 || z >= GRID_SIZE_Z)
+            return;
+
+        if (voxelGrid[x][y][z] != OCCUPIED || labels[x][y][z] != 0)
+            return;
+
+        labels[x][y][z] = currentLabel;
+
+        DFS(x + 1, y, z, currentLabel);
+        DFS(x - 1, y, z, currentLabel);
+        DFS(x, y + 1, z, currentLabel);
+        DFS(x, y - 1, z, currentLabel);
+        DFS(x, y, z + 1, currentLabel);
+        DFS(x, y, z - 1, currentLabel);
+    }
+
+    void estimateObjectSizes()
+    {
+        initializeLabels();
+
+        int currentLabel = 1;
+        for (int x = 0; x < GRID_SIZE_X; x++)
+        {
+            for (int y = 0; y < GRID_SIZE_Y; y++)
+            {
+                for (int z = 0; z < GRID_SIZE_Z; z++)
+                {
+                    if (voxelGrid[x][y][z] == OCCUPIED && labels[x][y][z] == 0)
+                    {
+                        DFS(x, y, z, currentLabel);
+                        currentLabel++;
+                    }
+                }
+            }
+        }
+
+        for (int label = 1; label < currentLabel; label++)
+        {
+            int minX = GRID_SIZE_X, minY = GRID_SIZE_Y, minZ = GRID_SIZE_Z;
+            int maxX = 0, maxY = 0, maxZ = 0;
+
+            for (int x = 0; x < GRID_SIZE_X; x++)
+            {
+                for (int y = 0; y < GRID_SIZE_Y; y++)
+                {
+                    for (int z = 0; z < GRID_SIZE_Z; z++)
+                    {
+                        if (labels[x][y][z] == label)
+                        {
+                            minX = std::min(minX, x);
+                            minY = std::min(minY, y);
+                            minZ = std::min(minZ, z);
+                            maxX = std::max(maxX, x);
+                            maxY = std::max(maxY, y);
+                            maxZ = std::max(maxZ, z);
+                        }
+                    }
+                }
+            }
+
+            float objectWidth = (maxX - minX + 1) * VOXEL_RESOLUTION;
+            float objectHeight = (maxY - minY + 1) * VOXEL_RESOLUTION;
+            float objectDepth = (maxZ - minZ + 1) * VOXEL_RESOLUTION;
+
+            RCLCPP_INFO(this->get_logger(), "Object %d: Width: %f, Height: %f, Depth: %f", label, objectWidth, objectHeight, objectDepth);
+        }
     }
 };
 
