@@ -107,6 +107,23 @@ private:
                 {
                     RCLCPP_WARN(this->get_logger(), "Terrain is not navigable.");
                 }
+
+                geometry_msgs::msg::Twist cmd_msg;
+
+                if (isTerrainNavigable(validPoints))
+                {
+                    
+                    cmd_msg.linear.x = 0.5;  // Move forward with a speed of 0.5 m/s
+                    cmd_msg.angular.z = 0.0; // No rotation
+                }
+                else
+                {
+                    cmd_msg.linear.x = 0.0;  // Stop
+                    cmd_msg.angular.z = 0.0; // No rotation
+                }
+
+                pub_->publish(cmd_msg);
+
             }
         }
 
